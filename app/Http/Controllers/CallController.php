@@ -8,10 +8,13 @@ use App\Models\PartnerCall;
 use App\Services\NotificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Throwable;
 
 class CallController extends Controller
 {
@@ -81,7 +84,46 @@ class CallController extends Controller
             $servers[] = ['urls' => config('calls.stun_urls')];
         }
         $relay = (bool) (config('calls.turn_urls') && config('calls.turn_secret'));
-        if ($relay) {
+        $meteredAppName = config('calls.metered_app_name');
+        $meteredApiKey = config('calls.metered_api_key');
+        abort_if((bool) $meteredAppName !== (bool) $meteredApiKey, 503, 'Calling relay is not configured.');
+
+        if ($meteredAppName && $meteredApiKey) {
+            abort_unless(preg_match('/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i', $meteredAppName), 503, 'Calling relay is not configured.');
+
+            try {
+                $response = Http::acceptJson()
+                    ->timeout(8)
+                    ->withOptions(['allow_redirects' => false])
+                    ->get("https://{$meteredAppName}.metered.live/api/v1/turn/credentials", ['apiKey' => $meteredApiKey]);
+            } catch (Throwable $exception) {
+                Log::warning('Metered TURN credentials could not be fetched.', ['account' => $meteredAppName, 'exception' => $exception::class]);
+                abort(503, 'Calling relay is temporarily unavailable. Please try again.');
+            }
+
+            if (! $response->successful() || ! is_array($response->json())) {
+                Log::warning('Metered TURN credentials request failed.', ['account' => $meteredAppName, 'status' => $response->status()]);
+                abort(503, 'Calling relay is temporarily unavailable. Please try again.');
+            }
+
+            $turnServers = collect($response->json())->filter(function ($server): bool {
+                if (! is_array($server) || ! isset($server['username'], $server['credential']) || ! is_string($server['username']) || ! is_string($server['credential'])) {
+                    return false;
+                }
+                $urls = $server['urls'] ?? null;
+                $urls = is_array($urls) ? $urls : [$urls];
+
+                return collect($urls)->contains(fn ($url): bool => is_string($url) && preg_match('/^turns?:/i', $url));
+            })->map(fn (array $server): array => [
+                'urls' => $server['urls'],
+                'username' => $server['username'],
+                'credential' => $server['credential'],
+            ])->values()->all();
+
+            abort_if($turnServers === [], 503, 'Calling relay is temporarily unavailable. Please try again.');
+            $servers = array_merge($servers, $turnServers);
+            $relay = true;
+        } elseif ($relay) {
             $username = now()->addHour()->timestamp.':'.$request->user()->id;
             $servers[] = ['urls' => config('calls.turn_urls'), 'username' => $username, 'credential' => base64_encode(hash_hmac('sha1', $username, config('calls.turn_secret'), true))];
         }
