@@ -86,7 +86,7 @@ class NotificationsTest extends TestCase
         $this->putJson('/api/notifications/settings', ['enabled_types' => ['invalid']])->assertUnprocessable();
         $this->putJson('/api/notifications/settings', ['partner_type' => 'partner_one'])->assertUnprocessable();
         $this->putJson('/api/notifications/settings', ['mode' => 'push'])->assertUnprocessable();
-        $this->withToken($one)->getJson('/api/notifications/settings')->assertOk()->assertJsonCount(9, 'data.enabled_types');
+        $this->withToken($one)->getJson('/api/notifications/settings')->assertOk()->assertJsonCount(10, 'data.enabled_types');
         for ($i = 0; $i < 23; $i++) {
             app(NotificationService::class)->send(1, 'partner_one', 'chat_message', (string) $i);
         }
@@ -120,6 +120,36 @@ class NotificationsTest extends TestCase
         $this->assertCount(7, $reminders);
         $this->assertStringNotContainsString('Private calendar', json_encode($reminders));
         $this->assertSame('calendar_reminder', $reminders[0]['kind']);
+    }
+
+    public function test_partner_birthday_alert_is_delivered_to_the_other_partner_once_per_year(): void
+    {
+        $this->travelTo(now()->setDate(2026, 10, 17)->setTime(9, 5));
+        $one = $this->token();
+        $two = $this->token('partner_two');
+        CoupleProfile::query()->firstOrFail()->update(['partner_two_birthday' => '2000-10-17']);
+
+        $this->artisan('ourspace:notifications')->assertSuccessful();
+        $this->artisan('ourspace:notifications')->assertSuccessful();
+
+        $this->withToken($one)->getJson('/api/notifications')->assertOk()->assertJsonCount(1, 'data.items')->assertJsonPath('data.items.0.kind', 'partner_birthday');
+        $this->withToken($two)->getJson('/api/notifications')->assertOk()->assertJsonCount(0, 'data.items');
+        $this->assertDatabaseCount('notifications', 1);
+    }
+
+    public function test_partner_birthdays_are_validated_returned_and_scheduled_as_local_reminders(): void
+    {
+        $this->travelTo(now()->setDate(2026, 10, 17)->setTime(8, 0));
+        $one = $this->token();
+        $this->withToken($one)->putJson('/api/couple-profile', ['partner_one_birthday' => '2020-02-29', 'partner_two_birthday' => '2000-10-18'])
+            ->assertOk()->assertJsonPath('data.partner_one_birthday', '2020-02-29')->assertJsonPath('data.partner_two_birthday', '2000-10-18');
+        $this->putJson('/api/couple-profile', ['partner_one_birthday' => '2030-10-17'])->assertUnprocessable()->assertJsonValidationErrors('partner_one_birthday');
+        $this->putJson('/api/couple-profile', ['partner_two_birthday' => 'invalid'])->assertUnprocessable()->assertJsonValidationErrors('partner_two_birthday');
+
+        $reminders = $this->getJson('/api/notifications/reminders')->assertOk()->json('data');
+        $birthday = collect($reminders)->firstWhere('kind', 'partner_birthday');
+        $this->assertNotNull($birthday);
+        $this->assertSame('birthday-2000-10-18-2026', $birthday['key']);
     }
 
     public function test_rollback_never_leaves_a_notification_and_cross_couple_inbox_is_hidden(): void

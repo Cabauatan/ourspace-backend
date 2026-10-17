@@ -16,6 +16,7 @@ class SpaceNotification extends Notification
         'daily_question' => ['Daily question', 'Take a moment to answer together.', '/questions'],
         'memory_created' => ['New memory', 'Your partner added a memory.', '/memories'],
         'challenge_completed' => ['Challenge completed', 'You completed a couple challenge.', '/challenges'],
+        'partner_birthday' => ['It’s your partner’s birthday!', 'Make their day special. Send them a birthday message.', '/chat'],
     ];
 
     public function __construct(public string $kind, public ?string $callId = null) {}

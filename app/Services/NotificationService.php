@@ -65,6 +65,10 @@ class NotificationService
                 if ($now->hour >= 9 && ($anniversary['start_date'] ?? null) === $now->toDateString()) {
                     $this->send($couple->id, $partner, 'anniversary', $now->toDateString());
                 }
+                $partnerBirthday = $couple->{$partner === 'partner_one' ? 'partner_two_birthday' : 'partner_one_birthday'};
+                if ($now->hour >= 9 && $partnerBirthday && $partnerBirthday->format('m-d') === $now->format('m-d')) {
+                    $this->send($couple->id, $partner, 'partner_birthday', $partnerBirthday->format('Y-m-d').':'.$now->year);
+                }
                 CalendarEvent::query()->where('couple_id', $couple->id)->whereNull('reminder_dismissed_at')->where('end_date', '>=', $now->toDateString())->where('reminder_at', '<=', $now->utc())->each(function (CalendarEvent $event) use ($couple, $partner): void {
                     $this->send($couple->id, $partner, 'calendar_reminder', $event->id.':'.$event->reminder_at->toIso8601String());
                 });
@@ -94,6 +98,10 @@ class NotificationService
             $anniversary = app(CalendarService::class)->anniversary($couple, $at->year);
             if (in_array('anniversary', $enabled, true) && ($anniversary['start_date'] ?? null) === $at->toDateString()) {
                 $items[] = ['key' => 'anniversary-'.$at->toDateString(), 'kind' => 'anniversary', 'at' => $at->utc()->toIso8601String()];
+            }
+            $partnerBirthday = $couple->{$device->partner_type === 'partner_one' ? 'partner_two_birthday' : 'partner_one_birthday'};
+            if (in_array('partner_birthday', $enabled, true) && $partnerBirthday && $partnerBirthday->format('m-d') === $at->format('m-d')) {
+                $items[] = ['key' => 'birthday-'.$partnerBirthday->format('Y-m-d').'-'.$at->year, 'kind' => 'partner_birthday', 'at' => $at->utc()->toIso8601String()];
             }
         }
 

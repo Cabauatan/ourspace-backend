@@ -18,6 +18,8 @@ class CoupleProfileResource extends JsonResource
             'avatar_version' => hash('sha256', ($this->partner_one_avatar ?? '').'|'.($this->partner_two_avatar ?? '')),
             'relationship_start_date' => $this->relationship_start_date?->format('Y-m-d'),
             'anniversary_date' => $this->anniversary_date?->format('Y-m-d'),
+            'partner_one_birthday' => $this->partner_one_birthday?->format('Y-m-d'),
+            'partner_two_birthday' => $this->partner_two_birthday?->format('Y-m-d'),
         ];
     }
 }
