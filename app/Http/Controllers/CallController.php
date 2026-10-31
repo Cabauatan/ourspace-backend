@@ -86,9 +86,17 @@ class CallController extends Controller
         $relay = (bool) (config('calls.turn_urls') && config('calls.turn_secret'));
         $meteredAppName = config('calls.metered_app_name');
         $meteredApiKey = config('calls.metered_api_key');
-        abort_if((bool) $meteredAppName !== (bool) $meteredApiKey, 503, 'Calling relay is not configured.');
 
-        if ($meteredAppName && $meteredApiKey) {
+        // Prefer explicitly configured TURN servers. This lets the app use
+        // shared Open Relay while retaining Metered API settings for rollback.
+        if ($relay) {
+            $username = now()->addHour()->timestamp.':'.$request->user()->id;
+            $servers[] = ['urls' => config('calls.turn_urls'), 'username' => $username, 'credential' => base64_encode(hash_hmac('sha1', $username, config('calls.turn_secret'), true))];
+        } else {
+            abort_if((bool) $meteredAppName !== (bool) $meteredApiKey, 503, 'Calling relay is not configured.');
+        }
+
+        if (! $relay && $meteredAppName && $meteredApiKey) {
             abort_unless(preg_match('/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i', $meteredAppName), 503, 'Calling relay is not configured.');
 
             try {
@@ -123,9 +131,6 @@ class CallController extends Controller
             abort_if($turnServers === [], 503, 'Calling relay is temporarily unavailable. Please try again.');
             $servers = array_merge($servers, $turnServers);
             $relay = true;
-        } elseif ($relay) {
-            $username = now()->addHour()->timestamp.':'.$request->user()->id;
-            $servers[] = ['urls' => config('calls.turn_urls'), 'username' => $username, 'credential' => base64_encode(hash_hmac('sha1', $username, config('calls.turn_secret'), true))];
         }
         abort_if(config('calls.relay_only') && ! $relay, 503, 'Calling is temporarily unavailable.');
 
