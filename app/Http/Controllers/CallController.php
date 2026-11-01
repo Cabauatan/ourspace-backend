@@ -199,13 +199,25 @@ class CallController extends Controller
     public function signal(Request $request, string $id): JsonResponse
     {
         $input = $request->validate(['type' => ['required', Rule::in(['offer', 'answer', 'ice'])], 'sdp' => ['required_unless:type,ice', 'string', 'max:60000'], 'candidate' => ['required_if:type,ice', 'array:candidate,sdpMid,sdpMLineIndex,usernameFragment'], 'candidate.candidate' => ['required_if:type,ice', 'string', 'max:2048'], 'candidate.sdpMid' => ['nullable', 'string', 'max:64'], 'candidate.sdpMLineIndex' => ['nullable', 'integer', 'min:0', 'max:3'], 'candidate.usernameFragment' => ['nullable', 'string', 'max:256']]);
+        if ($input['type'] !== 'ice') {
+            // Some Android WebRTC builds emit this optional SDP attribute in a
+            // form that other builds reject. It is safe to omit for our calls.
+            $input['sdp'] = preg_replace('/^a=max-message-size:\\d+\\r?$/m', '', $input['sdp']) ?? $input['sdp'];
+        }
 
         return $this->locked($request, function (Device $actor) use ($id, $input): JsonResponse {
             $call = $this->call($actor, $id);
             abort_unless(in_array($call->status, ['ringing', 'active'], true), 409);
             if ($input['type'] !== 'ice') {
                 abort_unless($input['type'] === 'offer' ? $actor->id === $call->caller_device_id : ($actor->id === $call->callee_device_id && $call->status === 'active'), 403);
-                abort_if(DB::table('call_signals')->where('call_id', $id)->where('type', $input['type'])->exists(), 409);
+                $existing = DB::table('call_signals')->where('call_id', $id)->where('type', $input['type'])->first();
+                if ($existing) {
+                    $existingPayload = json_decode(Crypt::decryptString($existing->payload), true, 512, JSON_THROW_ON_ERROR);
+                    abort_unless((int) $existing->device_id === (int) $actor->id && ($existingPayload['sdp'] ?? null) === $input['sdp'], 409);
+
+                    // HTTP retries may resend the same SDP after a timeout.
+                    return $this->result(null);
+                }
             }
             abort_if(DB::table('call_signals')->where('call_id', $id)->count() >= 256, 429);
             $payload = $input['type'] === 'ice' ? $input['candidate'] : ['sdp' => $input['sdp']];
