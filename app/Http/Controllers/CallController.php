@@ -83,58 +83,66 @@ class CallController extends Controller
         if (config('calls.stun_urls')) {
             $servers[] = ['urls' => config('calls.stun_urls')];
         }
-        $relay = (bool) (config('calls.turn_urls') && config('calls.turn_secret'));
+        $relay = false;
+        $relaySource = null;
         $meteredAppName = config('calls.metered_app_name');
         $meteredApiKey = config('calls.metered_api_key');
 
-        // Prefer explicitly configured TURN servers. This lets the app use
-        // shared Open Relay while retaining Metered API settings for rollback.
-        if ($relay) {
-            $username = now()->addHour()->timestamp.':'.$request->user()->id;
-            $servers[] = ['urls' => config('calls.turn_urls'), 'username' => $username, 'credential' => base64_encode(hash_hmac('sha1', $username, config('calls.turn_secret'), true))];
-        } else {
-            abort_if((bool) $meteredAppName !== (bool) $meteredApiKey, 503, 'Calling relay is not configured.');
-        }
-
-        if (! $relay && $meteredAppName && $meteredApiKey) {
-            abort_unless(preg_match('/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i', $meteredAppName), 503, 'Calling relay is not configured.');
-
+        // Prefer account-issued TURN credentials, then fall back to the
+        // staticauth Open Relay configuration if the Metered API is absent.
+        if ($meteredAppName && $meteredApiKey && preg_match('/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i', $meteredAppName)) {
+            $response = null;
             try {
                 $response = Http::acceptJson()
-                    ->timeout(8)
+                    ->timeout(5)
                     ->withOptions(['allow_redirects' => false])
                     ->get("https://{$meteredAppName}.metered.live/api/v1/turn/credentials", ['apiKey' => $meteredApiKey]);
             } catch (Throwable $exception) {
                 Log::warning('Metered TURN credentials could not be fetched.', ['account' => $meteredAppName, 'exception' => $exception::class]);
-                abort(503, 'Calling relay is temporarily unavailable. Please try again.');
             }
 
-            if (! $response->successful() || ! is_array($response->json())) {
-                Log::warning('Metered TURN credentials request failed.', ['account' => $meteredAppName, 'status' => $response->status()]);
-                abort(503, 'Calling relay is temporarily unavailable. Please try again.');
-            }
+            if ($response?->successful() && is_array($response->json())) {
+                $turnServers = collect($response->json())->filter(function ($server): bool {
+                    if (! is_array($server) || ! isset($server['username'], $server['credential']) || ! is_string($server['username']) || ! is_string($server['credential'])) {
+                        return false;
+                    }
+                    $urls = $server['urls'] ?? null;
+                    $urls = is_array($urls) ? $urls : [$urls];
 
-            $turnServers = collect($response->json())->filter(function ($server): bool {
-                if (! is_array($server) || ! isset($server['username'], $server['credential']) || ! is_string($server['username']) || ! is_string($server['credential'])) {
-                    return false;
+                    return collect($urls)->contains(fn ($url): bool => is_string($url) && preg_match('/^turns?:/i', $url));
+                })->map(fn (array $server): array => [
+                    'urls' => $server['urls'],
+                    'username' => $server['username'],
+                    'credential' => $server['credential'],
+                ])->values()->all();
+
+                if ($turnServers !== []) {
+                    $servers = array_merge($servers, $turnServers);
+                    $relay = true;
+                    $relaySource = 'metered';
                 }
-                $urls = $server['urls'] ?? null;
-                $urls = is_array($urls) ? $urls : [$urls];
-
-                return collect($urls)->contains(fn ($url): bool => is_string($url) && preg_match('/^turns?:/i', $url));
-            })->map(fn (array $server): array => [
-                'urls' => $server['urls'],
-                'username' => $server['username'],
-                'credential' => $server['credential'],
-            ])->values()->all();
-
-            abort_if($turnServers === [], 503, 'Calling relay is temporarily unavailable. Please try again.');
-            $servers = array_merge($servers, $turnServers);
-            $relay = true;
+            } else {
+                Log::warning('Metered TURN credentials request failed.', ['account' => $meteredAppName, 'status' => $response?->status()]);
+            }
+        } elseif ($meteredAppName || $meteredApiKey) {
+            Log::warning('Metered TURN credentials are incomplete or the app name is invalid.');
         }
+
+        if (! $relay && config('calls.turn_urls') && config('calls.turn_secret')) {
+            $username = now()->addHour()->timestamp.':'.$request->user()->id;
+            $servers[] = ['urls' => config('calls.turn_urls'), 'username' => $username, 'credential' => base64_encode(hash_hmac('sha1', $username, config('calls.turn_secret'), true))];
+            $relay = true;
+            $relaySource = 'openrelay';
+        }
+
+        if ($relay) {
+            Log::info('Call TURN relay configuration selected.', ['source' => $relaySource, 'server_count' => count($servers)]);
+        }
+
+        abort_if(! $relay && (bool) $meteredAppName !== (bool) $meteredApiKey, 503, 'Calling relay is not configured.');
         abort_if(config('calls.relay_only') && ! $relay, 503, 'Calling is temporarily unavailable.');
 
-        return $this->result(['iceServers' => $servers, 'iceTransportPolicy' => config('calls.relay_only') ? 'relay' : 'all', 'relay_available' => $relay]);
+        return $this->result(['iceServers' => $servers, 'iceTransportPolicy' => config('calls.relay_only') ? 'relay' : 'all', 'relay_available' => $relay, 'relay_source' => $relaySource]);
     }
 
     public function store(Request $request): JsonResponse
