@@ -59,6 +59,30 @@ class CallController extends Controller
         return $call->only(['id', 'kind', 'status', 'caller_device_id', 'callee_device_id', 'caller_partner', 'created_at', 'answered_at', 'ended_at']);
     }
 
+    private function normalizeCallSdp(string $sdp): string
+    {
+        $lines = preg_split('/\r\n|\r|\n/', $sdp) ?: [];
+        $count = count($lines);
+
+        for ($i = 0; $i < $count; $i++) {
+            if (! preg_match('~^m=application (\\d+) UDP/DTLS/SCTP webrtc-datachannel$~i', $lines[$i], $media)) {
+                continue;
+            }
+
+            for ($j = $i + 1; $j < $count && ! str_starts_with($lines[$j], 'm='); $j++) {
+                if (preg_match('/^a=sctp-port:(\\d+)$/i', $lines[$j], $port)) {
+                    // Older Android WebRTC SDP parsers still expect the draft
+                    // SCTP mapping syntax, while newer ones emit RFC 8841.
+                    $lines[$i] = "m=application {$media[1]} DTLS/SCTP {$port[1]}";
+                    $lines[$j] = "a=sctpmap:{$port[1]} webrtc-datachannel 1024";
+                    break;
+                }
+            }
+        }
+
+        return implode("\r\n", $lines);
+    }
+
     public function current(Request $request): JsonResponse
     {
         return $this->locked($request, function (Device $actor): JsonResponse {
@@ -203,6 +227,7 @@ class CallController extends Controller
             // Some Android WebRTC builds emit this optional SDP attribute in a
             // form that other builds reject. It is safe to omit for our calls.
             $input['sdp'] = preg_replace('/^a=max-message-size:\\d+\\r?$/m', '', $input['sdp']) ?? $input['sdp'];
+            $input['sdp'] = $this->normalizeCallSdp($input['sdp']);
         }
 
         return $this->locked($request, function (Device $actor) use ($id, $input): JsonResponse {
